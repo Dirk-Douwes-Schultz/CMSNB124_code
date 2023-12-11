@@ -7,11 +7,11 @@ some code may not work on newer versions of Nimble
 
 "Quebec_hospital_study_data.Rdata" - cleaned data
 
-"Full_Coupled_Model.R" - code for the Full Coupled Model from Section 4 of the main text
+"Full_Coupled_Model.R" - code for the Full Coupled Model from Section 5 of the main text
 
-"No_Absence_Clone_State_Model.R" - code for the No Absence/Clone State Model from Section 4 of the main text 
+"No_Absence_Clone_State_Model.R" - code for the No Absence/Clone State Model from Section 5 of the main text 
 
-"Non_Coupled_Model.R" - code for the Non-coupled Model from Section 4 of the main text
+"Non_Coupled_Model.R" - code for the Non-coupled Model from Section 5 of the main text
 
 "simulation_study.R" - will run a single replication of the simulation study from Section 2 of the supplementary materials
 
