@@ -1,4 +1,4 @@
-#code for the Non-coupled Model from Section 4 of the main text
+#code for the Non-coupled Model from Section 5 of the main text
 #set your working directory to source file location
 rm(list=ls())
 library(questionr)
@@ -12,7 +12,7 @@ library(lsr)
 
 memory.limit(size=1E10)
 
-#load in the data
+#bring in data
 load("Quebec_hospital_study_data.RData")
 mT <- length(admissions[1,])
 N <- length(admissions[,1])
@@ -20,17 +20,19 @@ lpsi <- log(admissions+1)
 mlpsi <- mean(lpsi)
 
 #Nimble constants and data
-hospitalConsts <- list(mT=length(admissions[1,]),N=length(admissions[,1]),lpsi=lpsi,mlpsi=mlpsi,
+hospitalConsts <- list(mT=length(admissions[1,]),N=length(admissions[,1]),
+                       lpsi=lpsi,mlpsi=mlpsi,
                        standard_cap=standard_cap,
-                       mobility_matrix=mobility_matrix,mmobility_matrix=mean(mobility_matrix),
+                       mobility_matrix=mobility_matrix,
+                       mmobility_matrix=mean(mobility_matrix),
+                       near_nei_matrix=near_nei_matrix,
+                       distance_weights=distance_weights,
                        new_variant=new_variant)
 
-hospitalData <- list(y=admissions,constraint_data1=1,
-                     constraint_data2=1,constraint_data3=1,
-                     constraint_data4=1)
 
+hospitalData <- list(y=admissions,constraint_data1=matrix(rep(1,mT*N),nrow=N,ncol=mT),
+                     constraint_data2=1)
 
-#Nimble model code, note that not all variables are named the same as in the main text
 hospitalCode <- nimbleCode({
   
   #likelihood
@@ -45,9 +47,12 @@ hospitalCode <- nimbleCode({
       lambda[i,t,1:7] <- c(1,lambda_en[i,t],lambda_en[i,t],lambda_ep[i,t],lambda_ep[i,t],lambda_ep[i,t],lambda_ep[i,t])
       r[i,t,1:7] <- c(1,r0,r0,r1,r1,r1,r1)
       lambda_ep[i,t] <- exp(b1[i]+
-                              rho1*(lpsi[i,t-1]-mlpsi))
+                              beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
+                              beta6*new_variant[t]+
+                              rho1*(lpsi[i,t-1]))
       lambda_en[i,t] <-  exp(b0[i]+
-                               rho0*(lpsi[i,t-1]-mlpsi))
+                               beta5*(mobility_matrix[i,t-1]-mmobility_matrix)+
+                               rho0*(lpsi[i,t-1]))
     }
   }
   
@@ -81,7 +86,6 @@ hospitalCode <- nimbleCode({
       logit(p33[i,t]) <- alpha[4]+alpha[9]*(standard_cap[i]-mean(standard_cap[1:N]))+
         alpha[12]*(mobility_matrix[i,t-1]-mmobility_matrix)
       
-      #transit[i,t,1:3] <- tm[i,t,S[i,t-1],1:3]
       S[i,t] ~ dcat(tm[i,t,S[i,t-1],1:7])
     }
   }
@@ -93,22 +97,35 @@ hospitalCode <- nimbleCode({
   }
   
   #constraints
-  constraint_data1 ~ dconstraint(b0[1]+.1 < b1[1] & b0[2]+.1 < b1[2] & b0[3]+.1 < b1[3] & b0[4]+.1 < b1[4] & b0[5]+.1 < b1[5] & 
-                                   b0[6]+.1 < b1[6] & b0[7]+.1 < b1[7] & b0[8]+.1 < b1[8] & b0[9]+.1 < b1[9] & b0[10]+.1 < b1[10])
+  for(i in 1:N){
+    for(t in 2:mT){
+      constraint_data1[i,t] ~ dconstraint((b0[i]+
+                                             beta5*(mobility_matrix[i,t-1]-mmobility_matrix)+.01) < (b1[i]+
+                                                                                                       beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
+                                                                                                       beta6*new_variant[t]))
+    }
+  }
   
-  constraint_data2 ~ dconstraint(b0[11]+.1 < b1[11] & b0[12]+.1 < b1[12] & b0[13]+.1 < b1[13] & b0[14]+.1 < b1[14] & b0[15]+.1 < b1[15] & 
-                                   b0[16]+.1 < b1[16] & b0[17]+.1 < b1[17] & b0[18]+.1 < b1[18] & b0[19]+.1 < b1[19] & b0[20]+.1 < b1[20])
+  constraint_data2 ~ dconstraint(rho0+.05<rho1)
   
-  constraint_data3 ~ dconstraint(b0[21]+.1 < b1[21] & b0[22]+.1 < b1[22] & b0[23]+.1  < b1[23]& b0[24]+.1 < b1[24] & b0[25]+.1 < b1[25] & 
-                                   b0[26]+.1 < b1[26] & b0[27]+.1 < b1[27] & b0[28]+.1 < b1[28] & b0[29]+.1 < b1[29] & b0[30]+.1 < b1[30])
-  
-  constraint_data4 ~ dconstraint(rho0+.05<rho1)
+  #mlik for the WAIC, see https://groups.google.com/g/nimble-users/c/Essgt2KsEtc/m/X-BAM9O_AwAJ for the idea
+  #this will calculate the marginalized density for the WAIC
+  #see Section 3.1 of the supplementary material
+  for(i in 1:N){
+    for(t in 1:mT){
+      #the dnorm is just fake it will be replaced with a custom sampler
+      mlik[i,t] ~ dnorm(0,1)
+    }
+  }
   
   #priors
   beta0~dnorm(0,sd=100)
   beta1~dnorm(0,sd=100)
   beta2~dnorm(0,sd=100)
   beta3~dnorm(0,sd=100)
+  beta4~dnorm(0,sd=100)
+  beta5~dnorm(0,sd=100)
+  beta6~dnorm(0,sd=100)
   rho1 ~ dunif(.1,1)
   rho0 ~ dunif(.1,1)
   r0 ~ dunif(0,10)
@@ -135,7 +152,7 @@ hospitalCode <- nimbleCode({
 })
 
 
-#Now we generate valid initial values for the hidden Markov chain
+#Now we produce valid starting values for the Markov chain
 tm_S_init <- matrix(nrow=6,ncol=6)
 tm_S_init[1,] <- c(0,1,0,0,0,0)
 tm_S_init[2,] <- c(0,.8,.2,0,0,0)
@@ -157,31 +174,57 @@ sum(is.na(S_init))
 
 S_init <- S_init+1
 
-#now we generate valid random initial values for the parameters
-b0_init <- rnorm(n=N,mean=0,sd=.5) 
-rho0_init <- runif(n=1,min=.1,max=.7)
-hospitalInits <- list("beta0"=rnorm(n=1,mean=0,sd=.5),"beta1"=rnorm(n=1,mean=0,sd=.5),
-                      "beta2"=rnorm(n=1,mean=0,sd=.5),"beta3"=rnorm(n=1,mean=0,sd=.5),
-                      "b0"=b0_init,"b1"=b0_init+runif(n=N,min=.1,max=2),
-                      "rho0"=rho0_init, "rho1"=runif(n=1,rho0_init+.05,1),
-                      "r1"=runif(n=1,min=0,max=20), "r0"=runif(n=1,min=0,max=10),
-                      "prec_b0"=runif(n=1,min=0,max=20),"prec_b1"=runif(n=1,min=0,max=20),
-                      "alpha"=rnorm(n=13,mean=0,sd=c(rep(.5,9),.1,.1,.1,.1)),
-                      "S"=S_init)
+#now we produce random valid starting values for the parameters
+mmobility_matrix <- mean(mobility_matrix)
+start <- 0
+while(start==0){
+  
+  b0_init <- rnorm(n=N,mean=0,sd=.5) 
+  rho0_init <- runif(n=1,min=.1,max=.7)
+  hospitalInits <- list("beta0"=rnorm(n=1,mean=0,sd=.5),"beta1"=rnorm(n=1,mean=0,sd=.5),
+                        "beta2"=rnorm(n=1,mean=0,sd=.5),"beta3"=rnorm(n=1,mean=0,sd=.5),
+                        "beta4"=rnorm(n=1,mean=0,sd=.1),"beta5"=rnorm(n=1,mean=0,sd=.1),
+                        "beta6"=rnorm(n=1,mean=0,sd=.1),
+                        "b0"=b0_init,"b1"=b0_init+runif(n=N,min=.1,max=2),
+                        "rho0"=rho0_init, "rho1"=runif(n=1,rho0_init+.05,1),
+                        "r1"=runif(n=1,min=0,max=20), "r0"=runif(n=1,min=0,max=10),
+                        "prec_b0"=runif(n=1,min=0,max=20),"prec_b1"=runif(n=1,min=0,max=20),
+                        "alpha"=rnorm(n=13,mean=0,sd=c(rep(.5,9),.1,.1,.1,.1)),
+                        "S"=S_init,
+                        "mlik"=matrix(rep(0,mT*N),nrow=N,ncol=mT))
+  
+  len <- matrix(nrow=N,ncol=mT)
+  lep <- matrix(nrow=N,ncol=mT)
+  for(i in 1:N){
+    for(t in 2:mT){
+      len[i,t] <- hospitalInits$b0[i]+
+        hospitalInits$beta5*(mobility_matrix[i,t-1]-mmobility_matrix)
+      lep[i,t] <- hospitalInits$b1[i]+
+        hospitalInits$beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
+        hospitalInits$beta6*new_variant[t]
+    }
+  }
+  ifelse(min(lep-len,na.rm=TRUE)>.01,start <- 1,start <- 0)
+  
+}
 
-#now we build and compile the model
+min(lep-len,na.rm=TRUE)
+
 hospital_model <- nimbleModel(code = hospitalCode,inits = hospitalInits, constants = hospitalConsts,
                               data = hospitalData)
 
 chospital_model  <- compileNimble(hospital_model)
 
-#make sure no NAs, if there are NAs then most likely need to tighten the inital values
+#make sure no NAs
 hospital_model$getLogProb()
 
 
+#the below code will test the FFBS sampler in one area
+#it will run a single iteration of the sampler in one area
+#this is very useful for debugging the sampler
+#note since this model is not coupled we use the FFBS and not iFFBS
 
-#the following code will setup and run an iteration of the FFBS sampler in a single area
-#this is very useful for testing/debugging the sampler
+#arguments
 model <- hospital_model
 dq1 <- !hospital_model$isData("S[1, ]")
 target <- "S[1, dq1]"
@@ -282,12 +325,210 @@ for(ict in 2:numnodes){
   }
 }
 
-#testing
+#test
+#these should be different from before running the sampler as new states have been sampled
+#getLogProb and calculate should return the same values
 model$S[1, dq1]
 model$getLogProb()
 model$calculate()
 
-#FFBS sampler code
+#compare q with that produced by the WAIC sampler below. should be the same
+print(q)
+
+
+##########################################################
+#the code below tests the WAIC sampler
+#this calculates the marginal density for the WAIC
+#see Section 3.1 of the supplementary materials
+#model and loc_test are already set
+
+target <- paste0("mlik[",1,", ",1:mT,"]")
+
+#setup
+nnames0 <- model$expandNodeNames(target)
+times <- as.numeric(gsub(".*\\[.*,(.*)\\].*", "\\1", nnames0))
+loc <- as.numeric(gsub(".*\\[(.*),.*\\].*", "\\1", nnames0[[1]]))
+calcNodes <- model$getDependencies(target)
+numnodes <- length(nnames0)
+nnames <- paste0("S[",loc,", ",1:numnodes,"]")
+#grab the dependencies of each target node
+dependencies <- NULL
+start_depend <- rep(NA,numnodes)
+start_depend[1] <- 1
+end_depend <- rep(NA,numnodes)
+index <- 1
+for (n in nnames){
+  d <- model$getDependencies(n)
+  dependencies <- c(dependencies,d)
+  end_depend[index] <- length(d)+start_depend[index]-1
+  start_depend[index+1] <- end_depend[index]+1
+  index <- index+1
+} 
+q <- matrix(nrow=numnodes,ncol=7)
+q[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
+#log likelihood for the states
+ll <- matrix(nrow=numnodes,ncol=7)
+ll[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
+
+#now run 
+#start with ct=1
+#in a non coupled filter it is just the initial state distribution
+q[1,1:7] <- model$uniff
+
+#now run filter 
+for(ct in 2:numnodes){
+  
+  #ct <- 2
+  q_tm1 <- q[ct-1,1:7]
+  p <- t(model$tm[loc,ct,1:7,1:7]) %*% asCol(q_tm1[1:7])
+  
+  #now need to calculate log-likelood
+  
+  #state 1 
+  if(model$y[loc,ct]==0){
+    ll[ct,1] <- 0
+  }else{
+    ll[ct,1] <- -Inf
+  }
+  
+  #state 2 and 3
+  llen <- dnbinom(x=model$y[loc,ct],size = model$r0 ,
+                  prob = model$r0/(model$r0+model$lambda_en[loc,ct]),log =TRUE)
+  
+  ll[ct,2] <- llen
+  ll[ct,3] <- llen
+  
+  #states 4 and 5
+  llep <- dnbinom(x=model$y[loc,ct],size = model$r1 ,
+                  prob = model$r1/(model$r1+model$lambda_ep[loc,ct]),log =TRUE)
+  
+  ll[ct,4] <- llep
+  ll[ct,5] <- llep
+  ll[ct,6] <- llep
+  ll[ct,7] <- llep
+  
+  nl <- ll[ct,1:7]+log(p[1:7,1])
+  nls <- nl-max(nl)
+  q[ct,1:7] <- exp(nls)/sum(exp(nls))
+  
+  #calculate the likelihood
+  nly <- asRow(exp(ll[ct,1:7])) %*% p
+  model$mlik[loc,ct] <- nly
+  
+  
+}
+
+model$calculate(nodes=calcNodes)
+
+#test
+calcNodes
+model$S[1, dq1]
+model$mlik[1,]
+model$getLogProb()
+model$calculate() 
+
+#q should be the same as above
+print(q)
+
+#mlik for WAIC
+#this sampler calculates the marginalized density for the WAIC
+#see Section 3.1 of the supplementary materials
+WAIC_mlik <- nimbleFunction(
+  
+  contains = sampler_BASE,
+  
+  setup = function(model, mvSaved, target, control) {
+    
+    nnames0 <- model$expandNodeNames(target)
+    times <- as.numeric(gsub(".*\\[.*,(.*)\\].*", "\\1", nnames0))
+    loc <- as.numeric(gsub(".*\\[(.*),.*\\].*", "\\1", nnames0[[1]]))
+    calcNodes <- model$getDependencies(target)
+    numnodes <- length(nnames0)
+    nnames <- paste0("S[",loc,", ",1:numnodes,"]")
+    #grab the dependencies of each target node
+    dependencies <- NULL
+    start_depend <- rep(NA,numnodes)
+    start_depend[1] <- 1
+    end_depend <- rep(NA,numnodes)
+    index <- 1
+    for (n in nnames){
+      d <- model$getDependencies(n)
+      dependencies <- c(dependencies,d)
+      end_depend[index] <- length(d)+start_depend[index]-1
+      start_depend[index+1] <- end_depend[index]+1
+      index <- index+1
+    }
+    q <- matrix(nrow=numnodes,ncol=7)
+    q[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
+    #log likelihood for the states
+    ll <- matrix(nrow=numnodes,ncol=7)
+    ll[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
+    
+  },
+  
+  
+  run = function() {
+    
+    #now run 
+    #start with ct=1
+    #in a non coupled filter it is just the initial state distribution
+    q[1,1:7] <<- model$uniff
+    
+    #now run filter 
+    for(ct in 2:numnodes){
+      
+      #ct <- 2
+      q_tm1 <- q[ct-1,1:7]
+      p <- t(model$tm[loc,ct,1:7,1:7]) %*% asCol(q_tm1[1:7])
+      
+      #now need to calculate log-likelood
+      
+      #state 1 
+      if(model$y[loc,ct]==0){
+        ll[ct,1] <<- 0
+      }else{
+        ll[ct,1] <<- -Inf
+      }
+      
+      #state 2 and 3
+      llen <- dnbinom(x=model$y[loc,ct],size = model$r0[1] ,
+                      prob = model$r0[1]/(model$r0[1]+model$lambda_en[loc,ct]),log =TRUE)
+      
+      ll[ct,2] <<- llen
+      ll[ct,3] <<- llen
+      
+      #states 4 and 5
+      llep <- dnbinom(x=model$y[loc,ct],size = model$r1[1] ,
+                      prob = model$r1[1]/(model$r1[1]+model$lambda_ep[loc,ct]),log =TRUE)
+      
+      ll[ct,4] <<- llep
+      ll[ct,5] <<- llep
+      ll[ct,6] <<- llep
+      ll[ct,7] <<- llep
+      
+      nl <- ll[ct,1:7]+log(p[1:7,1])
+      nls <- nl-max(nl)
+      q[ct,1:7] <<- exp(nls)/sum(exp(nls))
+      
+      #calculate likelihood
+      nly <- asRow(exp(ll[ct,1:7])) %*% p[1:7,1]
+      model$mlik[loc,ct] <<- nly[1,1]
+      
+    }
+    
+    
+    model$calculate(nodes=calcNodes)
+    
+    
+    copy(from = model, to = mvSaved, row = 1, 
+         nodes = calcNodes, logProb = TRUE)
+    
+  },
+  
+  methods = list(   reset = function () {}   )
+  
+)
+
 FFBS <- nimbleFunction(
   
   contains = sampler_BASE,
@@ -403,11 +644,10 @@ FFBS <- nimbleFunction(
 )
 
 
-
-#now setup the MCMC 
+#now run the model
 hospital_modelConf <- configureMCMC(hospital_model, print = TRUE)
 
-#add the FFBS samplers
+#have to add the FFBS samplers
 for(loc in 1:N){
   
   dq <- !hospital_model$isData(paste0("S[",loc,", ]"))
@@ -419,36 +659,72 @@ for(loc in 1:N){
 
 print(hospital_modelConf)
 
-hospital_modelConf$addMonitors(c("S","b0","b1","sigma_b0","sigma_b1","r0","r1"))
+
+#have to set WAIC samplers
+for(loc in 1:N){
+  hospital_modelConf$removeSampler(paste0("mlik[",loc,", ",1:mT,"]"))
+  hospital_modelConf$addSampler(target=hospital_model$expandNodeNames(paste0("mlik[",loc,", ",1:mT,"]")),
+                                type="WAIC_mlik")
+}
+
+print(hospital_modelConf)
+
+#make sure to check that WAIC_mlik is at the end of the MCMC order
+#addsampler should add them to the end but need to check 
+hospital_modelConf$printSamplers(executionOrder = TRUE)
+
+hospital_modelConf$addMonitors(c("S","b0","b1","sigma_b0","sigma_b1","r0","r1","mlik"))
 
 hospitalMCMC <- buildMCMC(hospital_modelConf)
 
 ChospitalMCMC <- compileNimble(hospitalMCMC, project = hospital_model ,resetFunctions = TRUE)
 
-#each chain will generate intial MCMC values using this function
+#this will generate random valid initial values for the MCMC chains
 initsFunction <- function(){
   
-  b0_init <- rnorm(n=N,mean=0,sd=.5) 
-  rho0_init <- runif(n=1,min=.1,max=.7)
+  start <- 0
+  while(start==0){
+    
+    b0_init <- rnorm(n=N,mean=0,sd=.5) 
+    rho0_init <- runif(n=1,min=.1,max=.7)
+    hospitalInits <- list("beta0"=rnorm(n=1,mean=0,sd=.5),"beta1"=rnorm(n=1,mean=0,sd=.5),
+                          "beta2"=rnorm(n=1,mean=0,sd=.5),"beta3"=rnorm(n=1,mean=0,sd=.5),
+                          "beta4"=rnorm(n=1,mean=0,sd=.1),"beta5"=rnorm(n=1,mean=0,sd=.1),
+                          "beta6"=rnorm(n=1,mean=0,sd=.1),
+                          "b0"=b0_init,"b1"=b0_init+runif(n=N,min=.1,max=2),
+                          "rho0"=rho0_init, "rho1"=runif(n=1,rho0_init+.05,1),
+                          "r1"=runif(n=1,min=0,max=20), "r0"=runif(n=1,min=0,max=10),
+                          "prec_b0"=runif(n=1,min=0,max=20),"prec_b1"=runif(n=1,min=0,max=20),
+                          "alpha"=rnorm(n=13,mean=0,sd=c(rep(.5,9),.1,.1,.1,.1)),
+                          "S"=S_init,
+                          "mlik"=matrix(rep(0,mT*N),nrow=N,ncol=mT))
+    
+    len <- matrix(nrow=N,ncol=mT)
+    lep <- matrix(nrow=N,ncol=mT)
+    for(i in 1:N){
+      for(t in 2:mT){
+        len[i,t] <- hospitalInits$b0[i]+
+          hospitalInits$beta5*(mobility_matrix[i,t-1]-mmobility_matrix)
+        lep[i,t] <- hospitalInits$b1[i]+
+          hospitalInits$beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
+          hospitalInits$beta6*new_variant[t]
+      }
+    }
+    ifelse(min(lep-len,na.rm=TRUE)>.01,start <- 1,start <- 0)
+    
+  }
+  print(min(lep-len,na.rm=TRUE))
   
-  return( list("beta0"=rnorm(n=1,mean=0,sd=.5),"beta1"=rnorm(n=1,mean=0,sd=.5),
-               "beta2"=rnorm(n=1,mean=0,sd=.5),"beta3"=rnorm(n=1,mean=0,sd=.5),
-               "b0"=b0_init,"b1"=b0_init+runif(n=N,min=.1,max=2),
-               "rho0"=rho0_init, "rho1"=runif(n=1,rho0_init+.05,1),
-               "r1"=runif(n=1,min=0,max=20), "r0"=runif(n=1,min=0,max=10),
-               "prec_b0"=runif(n=1,min=0,max=20),"prec_b1"=runif(n=1,min=0,max=20),
-               "alpha"=rnorm(n=13,mean=0,sd=c(rep(.5,9),.1,.1,.1,.1)),
-               "S"=S_init))
+  return(hospitalInits)
 } 
 
-#custom samplers cannot be run in parrelel
+#this will run the MCMC
 samples <- runMCMC(ChospitalMCMC,  niter =200000,nchains = 3,nburnin=50000
                    ,samplesAsCodaMCMC = TRUE,thin=15,inits = initsFunction)
 
 
-#check convergence
-
-#should all be less then 1.05
+##test convergence
+#should all be less than 1.05
 gelman.diag(samples[,c("beta0","beta1","beta2","beta3","r1","sigma_b0","sigma_b1","rho1","alpha[1]","alpha[2]",
                        "b0[1]","alpha[3]","alpha[4]","rho0","r0","alpha[5]","alpha[6]","alpha[7]","alpha[8]","alpha[9]",
                        "alpha[10]","alpha[11]","alpha[12]","alpha[13]",
@@ -459,10 +735,10 @@ gelman.diag(samples[,c("beta0","beta1","beta2","beta3","r1","sigma_b0","sigma_b1
                        "b0[17]","b1[17]","b0[18]","b1[18]","b0[19]","b1[19]","b0[20]","b1[20]",
                        "b0[21]","b1[21]","b0[22]","b1[22]","b0[23]","b1[23]",
                        "b0[24]","b1[24]","b0[25]","b1[25]","b0[26]","b1[26]",
-                       "b0[27]","b1[27]","b0[28]","b1[28]","b0[29]","b1[29]","b0[30]","b1[30]")])
+                       "b0[27]","b1[27]","b0[28]","b1[28]","b0[29]","b1[29]","b0[30]","b1[30]",
+                       "beta4","beta5","beta6")])
 
-
-#should be >1000
+#should be greater than 1000
 min(effectiveSize(samples[,c("beta0","beta1","beta2","beta3","r1","sigma_b0","sigma_b1","rho1","alpha[1]","alpha[2]",
                              "b0[1]","alpha[3]","alpha[4]","rho0","r0","alpha[5]","alpha[6]","alpha[7]","alpha[8]","alpha[9]",
                              "alpha[10]","alpha[11]","alpha[12]","alpha[13]",
@@ -473,53 +749,50 @@ min(effectiveSize(samples[,c("beta0","beta1","beta2","beta3","r1","sigma_b0","si
                              "b0[17]","b1[17]","b0[18]","b1[18]","b0[19]","b1[19]","b0[20]","b1[20]",
                              "b0[21]","b1[21]","b0[22]","b1[22]","b0[23]","b1[23]",
                              "b0[24]","b1[24]","b0[25]","b1[25]","b0[26]","b1[26]",
-                             "b0[27]","b1[27]","b0[28]","b1[28]","b0[29]","b1[29]","b0[30]","b1[30]")]))
+                             "b0[27]","b1[27]","b0[28]","b1[28]","b0[29]","b1[29]","b0[30]","b1[30]",
+                             "beta4","beta5","beta6")]))
 
-#visually examine the traceplots
-plot(samples[,c("beta0","beta1")])
-plot(samples[,c("beta2","beta3")])
-plot(samples[,c("r0","r1")])
-plot(samples[,c("sigma_b0","sigma_b1")])
-plot(samples[,c("rho0","rho1")])
+
+#can also exam some traceplots
+#note not all of these are parameters in the model
+plot(samples[,c("mlik[1, 90]","mlik[1, 100]")])
+plot(samples[,c("alpha[13]","alpha[14]")])
+plot(samples[,c("alpha[7]","alpha[12]")])
+plot(samples[,c("beta4","beta5","beta6")])
 plot(samples[,c("alpha[1]","alpha[2]")])
-plot(samples[,c("alpha[2]","alpha[3]","alpha[4]")])
-plot(samples[,c("alpha[5]","alpha[6]","alpha[7]")])
-plot(samples[,c("alpha[8]","alpha[9]")])
-plot(samples[,c("alpha[10]","alpha[11]","alpha[12]","alpha[13]")])
+plot(samples[,c("alpha[11]","alpha[2]")])
+plot(samples[,c("alpha[17]","alpha[2]")])
+
+plot(samples[,c("beta0","beta1")])
+plot(samples[,c("beta1","rho1")])
+plot(samples[,c("rho0","rho1")])
+plot(samples[,c("beta2","beta3")])
+plot(samples[,c("beta4","beta5")])
+plot(samples[,c("alpha[5]","alpha[10]","alpha[15]")])
+
 plot(samples[,c("b0[1]","b1[1]")])
-plot(samples[,c("b0[2]","b1[2]")])
-plot(samples[,c("b0[3]","b1[3]")])
-plot(samples[,c("b0[4]","b1[4]")])
-plot(samples[,c("b0[5]","b1[5]")])
-plot(samples[,c("b0[6]","b1[6]")])
-plot(samples[,c("b0[7]","b1[7]")])
-plot(samples[,c("b0[8]","b1[8]")])
-plot(samples[,c("b0[9]","b1[9]")])
-plot(samples[,c("b0[10]","b1[10]")])
-plot(samples[,c("b0[11]","b1[11]")])
-plot(samples[,c("b0[12]","b1[12]")])
-plot(samples[,c("b0[13]","b1[13]")])
-plot(samples[,c("b0[14]","b1[14]")])
-plot(samples[,c("b0[15]","b1[15]")])
-plot(samples[,c("b0[16]","b1[16]")])
-plot(samples[,c("b0[17]","b1[17]")])
-plot(samples[,c("b0[18]","b1[18]")])
-plot(samples[,c("b0[19]","b1[19]")])
-plot(samples[,c("b0[20]","b1[20]")])
-plot(samples[,c("b0[21]","b1[21]")])
-plot(samples[,c("b0[22]","b1[22]")])
-plot(samples[,c("b0[23]","b1[23]")])
-plot(samples[,c("b0[24]","b1[24]")])
-plot(samples[,c("b0[25]","b1[25]")])
-plot(samples[,c("b0[26]","b1[26]")])
-plot(samples[,c("b0[27]","b1[27]")])
-plot(samples[,c("b0[28]","b1[28]")])
-plot(samples[,c("b0[29]","b1[29]")])
-plot(samples[,c("b0[30]","b1[30]")])
 
-
-#this code will calculate the retrospective fits
+#now can calculate the WAIC from Table 1
 samps <- data.frame(rbind(samples[[1]],samples[[2]],samples[[3]]))
+lppd <- 0 
+pwaic <- 0
+
+for(i in 1:N){
+  print(i)
+  for(t in 2:mT){
+    
+    mlikit <- samps[,paste0("mlik.",i,"..",t,".")]
+    
+    lppd <- lppd + log(mean(mlikit))
+    pwaic <- pwaic + var(log(mlikit))
+  }
+}
+
+waic <- -2*(lppd-pwaic)
+#should be 17,639
+
+#fitted values
+mmobility_matrix <- mean(mobility_matrix)
 fitted <- array(dim = c(N,mT,30000))
 fitted_en <- array(dim = c(N,mT,30000))
 fitted_ep <- array(dim = c(N,mT,30000))
@@ -532,18 +805,19 @@ for(i in 1:N){
   for(t in 2:mT){
     
     lambda_epit <- exp(as.numeric(unlist(samps[paste0("b1.",i,".")]))+
-                         as.numeric(unlist(samps[paste0("rho1")]))*(lpsi[i,t-1]-mlpsi))
+                         samps[,"beta4"]*(mobility_matrix[i,t-1]-mmobility_matrix)+
+                         samps[,"beta6"]*new_variant[t]+
+                         as.numeric(unlist(samps[paste0("rho1")]))*(lpsi[i,t-1]))
     
     
     lambda_enit <-  exp(as.numeric(unlist(samps[paste0("b0.",i,".")]))+
-                          as.numeric(unlist(samps[paste0("rho0")]))*(lpsi[i,t-1]-mlpsi))
+                          samps[,"beta5"]*(mobility_matrix[i,t-1]-mmobility_matrix)+
+                          as.numeric(unlist(samps[paste0("rho0")]))*(lpsi[i,t-1]))
     
     
     r0it <- as.numeric(unlist(samps[paste0("r0")]))
     r1it <- as.numeric(unlist(samps[paste0("r1")]))
     
-    #I see no other way to do this then to go through the draws in a for loop
-    #might be extremely slow though
     sit <- as.numeric(unlist(samps[paste0("S.",i,"..",t,".")]))
     lambdait <- rep(NA,30000)
     indiit <- rep(NA,30000)
@@ -574,8 +848,7 @@ for(i in 1:N){
   }
 }
 
-
-#will plot the retropspective fit like Figure 4 in the main text
+#plots Figure 5 from the main text for all areas
 for(i in 1:30){
   
   med_en = apply(fitted_en[i,,],MARGIN = 1,mean)
@@ -610,10 +883,4 @@ for(i in 1:30){
   lines(medsab,col="green")
   
 }
-
-
-
-
-
-
 

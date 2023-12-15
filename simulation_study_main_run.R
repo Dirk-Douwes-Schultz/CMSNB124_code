@@ -1,6 +1,9 @@
-#code for the Full Coupled Model from Section 5 of the main text
-#set your working directory to source file location
-rm(list=ls())
+#will run the spatial model on the simulated data set from Section 4 of the main text
+#produces and evaluates the retrospective state estimates
+#to produce the real-time state estimates you need to fit the model
+#up to time T=100,...,120, this code just fits up to T=120
+#set working directory to source file location
+rm(list = ls())
 library(questionr)
 library(dplyr)
 library(nimble)
@@ -12,31 +15,78 @@ library(lsr)
 
 memory.limit(size=1E10)
 
-#bring in data
-load("Quebec_hospital_study_data.RData")
-mT <- length(admissions[1,])
-N <- length(admissions[,1])
+load("simulations1_spatial.RData")
+
+print(table(Ssim))
+
+plot(ysim[1,])
+lines(ysim[1,])
+plot(ysim[6,])
+lines(ysim[6,])
+
+#beds covariate
+standard_cap <- c(772,282,359,380,321,253,531,320,240,376,487,288,421,244,419,104,
+                  257,261,564,256,191,544,274,371,373,341,277,293,324,467)/100
+
+#need to set up the neighborhood structure
+#5 clusters of 6 areas, so each area has 5 neighbors
+cluster <- rep(NA,30)
+cluster[1:6] <- 1
+cluster[7:12] <- 2
+cluster[13:18] <- 3
+cluster[19:24] <- 4
+cluster[25:30] <- 5
+
+#make a nighborhood matrix
+#1 if neighbor 0 if not
+#neighbor if in the same cluster
+N_matrix <- matrix(rep(0,30*30),nrow=30,ncol=30)
+for(i in 1:30){
+  N_matrix[i,cluster==cluster[i]] <- 1
+}
+
+diag(N_matrix) <- 0
+rowSums(N_matrix)
+
+#make a weight matrix
+#we will take the weight 1 if in same cluster and 0 else
+#so weight matrix and neighborhood matrix is the same
+W_matrix <- N_matrix
+
+#the following variables are functions of the neighborhood/weight matrix
+#they help with interacting with the neighborhoods
+count <- rep(NA,30)
+num <- rep(NA,30)
+for(i in 1:30){
+  num[i] <- sum(N_matrix[i,])
+}
+count[1] <- 1 
+for(i in 1:29){
+  count[i+1]  <- count[i]+num[i]
+}
+adj <- as.numeric(as.carAdjacency(N_matrix)$adj)
+
+
+#more variables
+admissions <- ysim
 lpsi <- log(admissions+1)
 mlpsi <- mean(lpsi)
+mT <- length(admissions[1,])
+N <- length(admissions[,1])
 
 #Nimble constants and data
-hospitalConsts <- list(mT=length(admissions[1,]),N=length(admissions[,1]),
+hospitalConsts <- list(mT=length(admissions[1,]),
+                       N=length(admissions[,1]),
                        lpsi=lpsi,mlpsi=mlpsi,
                        standard_cap=standard_cap,
-                       mobility_matrix=mobility_matrix,
-                       mmobility_matrix=mean(mobility_matrix),
-                       new_variant=new_variant,
                        adj=adj,num=num,count=count,
-                       W_matrix=W_matrix,
-                       near_nei_matrix=near_nei_matrix,
-                       distance_weights=distance_weights)
+                       W_matrix=W_matrix)
 
 
-hospitalData <- list(y=admissions,
-                     constraint_data1=matrix(rep(1,mT*N),nrow=N,ncol=mT),
+hospitalData <- list(y=admissions,constraint_data1=rep(1,30),
                      constraint_data2=1)
 
-#model code, not all variables have the same name as the text
+#spatial model code
 hospitalCode <- nimbleCode({
   
   #likelihood
@@ -50,12 +100,9 @@ hospitalCode <- nimbleCode({
       
       lambda[i,t,1:7] <- c(1,lambda_en[i,t],lambda_en[i,t],lambda_ep[i,t],lambda_ep[i,t],lambda_ep[i,t],lambda_ep[i,t])
       r[i,t,1:7] <- c(1,r0,r0,r1,r1,r1,r1)
-      lambda_ep[i,t] <- exp(b1[i]+
-                              beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
-                              beta6*new_variant[t]+
+      lambda_ep[i,t] <- exp(beta1+beta3*(standard_cap[i]-mean(standard_cap[1:N]))+
                               rho1*(lpsi[i,t-1]))
-      lambda_en[i,t] <-  exp(b0[i]+
-                               beta5*(mobility_matrix[i,t-1]-mmobility_matrix)+
+      lambda_en[i,t] <-  exp(beta0+beta2*(standard_cap[i]-mean(standard_cap[1:N]))+
                                rho0*(lpsi[i,t-1]))
     }
   }
@@ -67,14 +114,7 @@ hospitalCode <- nimbleCode({
     S[i,1] ~ dcat(uniff[1:7])
     for(t in 2:mT){
       
-      #calc neiborhood epidemic sum
-      # prev_nei_epi_sum[i,t-1] <-(distance_weights[i,1]*epi_indi[S[near_nei_matrix[i,1],t-1]]+
-      #                            distance_weights[i,2]*epi_indi[S[near_nei_matrix[i,2],t-1]]+
-      #                            distance_weights[i,3]*epi_indi[S[near_nei_matrix[i,3],t-1]]+
-      #                            distance_weights[i,4]*epi_indi[S[near_nei_matrix[i,4],t-1]]+
-      #                            distance_weights[i,5]*epi_indi[S[near_nei_matrix[i,5],t-1]])
-      
-      #more efficient then the above commented code
+      #calc Neighbor Sum for t=t-1 
       Snei[i,(t-1),num[i]] <- epi_indi[S[adj[count[i]],(t-1)]]*W_matrix[i,adj[count[i]]]
       for(j in 2:num[i]){
         Snei[i,(t-1),num[i]-j+1] <- Snei[i,(t-1),num[i]-j+2] + 
@@ -89,96 +129,47 @@ hospitalCode <- nimbleCode({
       tm[i,t,5,1:7] <- c(0,0,0,0,0,1,0)
       tm[i,t,6,1:7] <- c(0,0,0,0,0,0,1)
       tm[i,t,7,1:7] <- c(0,1-p33[i,t],0,0,0,0,p33[i,t])
-      logit(p12[i,t]) <- alpha[1]+alpha[5]*(standard_cap[i]-mean(standard_cap[1:N]))+
-        alpha[10]*(mobility_matrix[i,t-1]-mmobility_matrix)+alpha[15]*Snei[i,(t-1),1]
-      lp21op22[i,t] <- alpha[2]+alpha[6]*(standard_cap[i]-mean(standard_cap[1:N]))+
-        alpha[11]*(mobility_matrix[i,t-1]-mmobility_matrix)+alpha[16]*Snei[i,(t-1),1]
+      logit(p12[i,t]) <- alpha[1]
+      lp21op22[i,t] <- alpha[2]
       #mobility_matrix is already lagged by 3
       #therefore with t-1 it is lagged by 4
-      lp23op22[i,t] <- alpha[3]+alpha[7]*(mobility_matrix[i,t-1]-mmobility_matrix)+
-        alpha[8]*(standard_cap[i]-mean(standard_cap[1:N]))+
-        alpha[13]*Snei[i,(t-1),1]+alpha[17]*new_variant[t]
+      lp23op22[i,t] <- alpha[3]+alpha[5]*Snei[i,(t-1),1]
       p22[i,t] <- 1/(1+exp(lp21op22[i,t])+exp(lp23op22[i,t]))
       p21[i,t] <- exp(lp21op22[i,t])/(1+exp(lp21op22[i,t])+exp(lp23op22[i,t]))
       p23[i,t] <- exp(lp23op22[i,t])/(1+exp(lp21op22[i,t])+exp(lp23op22[i,t]))
-      logit(p33[i,t]) <- alpha[4]+alpha[9]*(standard_cap[i]-mean(standard_cap[1:N]))+
-        alpha[12]*(mobility_matrix[i,t-1]-mmobility_matrix)+
-        alpha[14]*Snei[i,(t-1),1]
+      logit(p33[i,t]) <- alpha[4]
       
       S[i,t] ~ dcat(tm[i,t,S[i,t-1],1:7])
     }
   }
   
-  #random effects
-  for(i in 1:N){
-    b0[i] ~ dnorm(mean=beta0+beta2*(standard_cap[i]-mean(standard_cap[1:N])),prec_b0)
-    b1[i] ~ dnorm(mean=beta1+beta3*(standard_cap[i]-mean(standard_cap[1:N])),prec_b1)
-  }
   
   #constraints
+  #since there are no space-time covariates
+  #we only have to loop from i=1 to N
+  #we use .1 as opposed to .01 since we are constraining
+  #the average difference in transmission
   for(i in 1:N){
-    for(t in 2:mT){
-      constraint_data1[i,t] ~ dconstraint((b0[i]+
-                                             beta5*(mobility_matrix[i,t-1]-mmobility_matrix)+.01) < (b1[i]+
-                                                                                                       beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
-                                                                                                       beta6*new_variant[t]))
-    }
+    
+    constraint_data1[i] ~ dconstraint((beta0+beta2*(standard_cap[i]-mean(standard_cap[1:N]))+.1) < (beta1+beta3*(standard_cap[i]-mean(standard_cap[1:N]))))
   }
   
   constraint_data2 ~ dconstraint(rho0+.05<rho1)
-  
-  #mlik for the WAIC, see https://groups.google.com/g/nimble-users/c/Essgt2KsEtc/m/X-BAM9O_AwAJ for the idea
-  #this will calculate the partially marginalized density for the WAIC
-  #see Section 3.1 of the supplementary material
-  for(i in 1:N){
-    for(t in 1:mT){
-      #the dnorm is just fake it will be replaced with a custom sampler
-      mlik[i,t] ~ dnorm(0,1)
-    }
-  }
   
   #priors
   beta0~dnorm(0,sd=100)
   beta1~dnorm(0,sd=100)
   beta2~dnorm(0,sd=100)
   beta3~dnorm(0,sd=100)
-  beta4~dnorm(0,sd=100)
-  beta5~dnorm(0,sd=100)
-  beta6~dnorm(0,sd=100)
   rho1 ~ dunif(.1,1)
   rho0 ~ dunif(.1,1)
-  r0 ~ dunif(0,10)
+  r0 <- r1
   r1 ~ dunif(0,50)
-  prec_b0 ~ dgamma(.1,.1)
-  prec_b1 ~ dgamma(.1,.1)
-  sigma_b0 <- 1/sqrt(prec_b0)
-  sigma_b1 <- 1/sqrt(prec_b1)
-  #alpha[1] ~ dt(mu=0,tau=1/(5^2),df=1)
-  #alpha[2] ~ dt(mu=0,tau=1/(5^2),df=1)
-  #alpha[3] ~ dt(mu=0,tau=1/(5^2),df=1)
-  #alpha[4] ~ dt(mu=0,tau=1/(5^2),df=1)
-  #while the above Cauchy priors can be used
-  #we recommend shrinking the transition probabilities slightly towards zero
-  #as it improves the stability of the MCMC algorithm
-  #see Section 5.4 of the text
-  alpha[1] ~ dnorm(mean=0,sd=3)
-  alpha[2] ~ dnorm(mean=0,sd=3)
-  alpha[3] ~ dnorm(mean=0,sd=3)
-  alpha[4] ~ dnorm(mean=0,sd=3)
-  alpha[5] ~ dt(mu=0,tau=1/(.9442955^2),df=1)
-  alpha[6] ~ dt(mu=0,tau=1/(.9442955^2),df=1)
-  alpha[7] ~ dt(mu=0,tau=1/(.06017889^2),df=1)
-  alpha[8] ~ dt(mu=0,tau=1/(.9442955^2),df=1)
-  alpha[9] ~ dt(mu=0,tau=1/(.9442955^2),df=1)
-  alpha[10] ~ dt(mu=0,tau=1/(.06017889^2),df=1)
-  alpha[11] ~ dt(mu=0,tau=1/(.06017889^2),df=1)
-  alpha[12] ~ dt(mu=0,tau=1/(.06017889^2),df=1)
-  alpha[13] ~ dnorm(0,sd=.36)
-  alpha[14] ~ dnorm(0,sd=.36)
-  alpha[15] ~ dnorm(0,sd=.36)
-  alpha[16] ~ dnorm(0,sd=.36)
-  alpha[17] ~ dt(mu=0,tau=1/(2.5^2),df=1)
-  
+  alpha[1] ~ dt(mu=0,tau=1/(5^2),df=1)
+  alpha[2] ~ dt(mu=0,tau=1/(5^2),df=1)
+  alpha[3] ~ dt(mu=0,tau=1/(5^2),df=1)
+  alpha[4] ~ dt(mu=0,tau=1/(5^2),df=1)
+  alpha[5] ~ dnorm(0,sd=.36)
   
 })
 
@@ -194,7 +185,7 @@ tm_S_init[6,] <- c(.2,0,0,0,0,.8)
 S_init <- matrix(nrow=N,ncol=mT)
 
 for(i in 1:N){
-  S_init[i,1] <- 2
+  S_init[i,1] <- sample(x=c(1,2,3,4,5,6),size = 1,prob=c(1/6,1/6,1/6,1/6,1/6,1/6))
   for(t in 2:mT){
     S_init[i,t] <- sample(x=c(1,2,3,4,5,6),size = 1,prob=tm_S_init[S_init[i,t-1],])
   }
@@ -205,36 +196,26 @@ sum(is.na(S_init))
 S_init <- S_init+1
 
 #now we produce random valid starting values for the parameters
-mmobility_matrix <- mean(mobility_matrix)
 start <- 0
 while(start==0){
   
-  b0_init <- rnorm(n=N,mean=0,sd=.5) 
   rho0_init <- runif(n=1,min=.1,max=.7)
   hospitalInits <- list("beta0"=rnorm(n=1,mean=0,sd=.5),"beta1"=rnorm(n=1,mean=0,sd=.5),
                         "beta2"=rnorm(n=1,mean=0,sd=.5),"beta3"=rnorm(n=1,mean=0,sd=.5),
-                        "beta4"=rnorm(n=1,mean=0,sd=.1),"beta5"=rnorm(n=1,mean=0,sd=.1),
-                        "beta6"=rnorm(n=1,mean=0,sd=.1),
-                        "b0"=b0_init,"b1"=b0_init+runif(n=N,min=.1,max=2),
                         "rho0"=rho0_init, "rho1"=runif(n=1,rho0_init+.05,1),
-                        "r1"=runif(n=1,min=0,max=20), "r0"=runif(n=1,min=0,max=10),
-                        "prec_b0"=runif(n=1,min=0,max=20),"prec_b1"=runif(n=1,min=0,max=20),
-                        "alpha"=rnorm(n=17,mean=0,sd=c(rep(.5,9),.1,.1,.1,.1,.1,.1,.1,.1)),
-                        "S"=S_init,
-                        "mlik"=matrix(rep(0,mT*N),nrow=N,ncol=mT))
+                        "r1"=runif(n=1,min=0,max=20),
+                        "alpha"=rnorm(n=5,mean=0,sd=.5),
+                        "S"=S_init)
   
   len <- matrix(nrow=N,ncol=mT)
   lep <- matrix(nrow=N,ncol=mT)
   for(i in 1:N){
     for(t in 2:mT){
-      len[i,t] <- hospitalInits$b0[i]+
-        hospitalInits$beta5*(mobility_matrix[i,t-1]-mmobility_matrix)
-      lep[i,t] <- hospitalInits$b1[i]+
-        hospitalInits$beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
-        hospitalInits$beta6*new_variant[t]
+      len[i,t] <- hospitalInits$beta0+hospitalInits$beta2*(standard_cap[i]-mean(standard_cap[1:N]))
+      lep[i,t] <- hospitalInits$beta1+hospitalInits$beta3*(standard_cap[i]-mean(standard_cap[1:N]))
     }
   }
-  ifelse(min(lep-len,na.rm=TRUE)>.01,start <- 1,start <- 0)
+  ifelse(min(lep-len,na.rm=TRUE)>.1,start <- 1,start <- 0)
   
 }
 
@@ -247,7 +228,6 @@ chospital_model  <- compileNimble(hospital_model)
 
 #make sure no NAs
 hospital_model$getLogProb()
-#hospital_model$calculate()
 
 
 #the below code will test the iFFBS sampler in one area
@@ -519,506 +499,6 @@ model$S[loc_test, dq1]
 model$getLogProb()
 model$calculate()
 #so worked properly
-
-#compare q with that produced by the WAIC sampler below, should be the same
-print(q)
-
-##########################################################
-#the code below tests the WAIC sampler
-#this calculates the partially marginalized density for the WAIC
-#see Section 3.1 of the supplementary materials
-#model and loc_test are already set
-target <- paste0("mlik[",loc_test,", ",1:mT,"]")
-
-#setup
-nnames0 <- model$expandNodeNames(target)
-times <- as.numeric(gsub(".*\\[.*,(.*)\\].*", "\\1", nnames0))
-loc <- as.numeric(gsub(".*\\[(.*),.*\\].*", "\\1", nnames0[[1]]))
-calcNodes <- model$getDependencies(target)
-numnodes <- length(nnames0)
-nnames <- paste0("S[",loc,", ",1:numnodes,"]")
-#grab the dependencies of each target node
-dependencies <- NULL
-start_depend <- rep(NA,numnodes)
-start_depend[1] <- 1
-end_depend <- rep(NA,numnodes)
-index <- 1
-for (n in nnames){
-  d <- model$getDependencies(n)
-  dependencies <- c(dependencies,d)
-  end_depend[index] <- length(d)+start_depend[index]-1
-  start_depend[index+1] <- end_depend[index]+1
-  index <- index+1
-} 
-#need forward dependencies, this may have to be modified if you change model specification
-#note this does not work for last time as last time has no forward dependencies
-f_dependencies <- NULL
-f_start_depend <- rep(NA,numnodes)
-f_start_depend[1] <- 1
-f_end_depend <- rep(NA,numnodes)
-index <- 1
-for(n in nnames){
-  d <- model$getDependencies(n)
-  d <- d[grepl(paste0(".*\\[(?!",loc,",).*,.*\\].*"),d,perl=TRUE)]
-  f_dependencies <- c(f_dependencies,d)
-  f_end_depend[index] <- length(d)+f_start_depend[index]-1
-  f_start_depend[index+1] <- f_end_depend[index]+1
-  index <- index+1
-}
-
-q <- matrix(nrow=numnodes,ncol=7)
-q[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
-#log likelihood for the states
-ll <- matrix(nrow=numnodes,ncol=7)
-ll[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
-#log forward adjustment
-lf <- matrix(nrow=numnodes,ncol=7)
-lf[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
-
-#now run 
-#start with ct=1
-#in coupled filter have to add the lf to the log of the initial state distribution
-#the forward dependencies should only depend on if the main chain state is epidemic
-
-#calc forward dependencies
-original_state <- model$S[loc,1]
-original_epi <- model$epi_indi[original_state]
-
-if(original_epi==0){
-  
-  end_lf <- model$getLogProb(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-  lf[1,1] <- end_lf
-  lf[1,2] <- end_lf
-  lf[1,3] <- end_lf
-  
-  #now need to calcl epi_lf
-  model$S[loc,1] <- 4
-  epi_lf <- model$calculate(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-  lf[1,4] <- epi_lf
-  lf[1,5] <- epi_lf
-  lf[1,6] <- epi_lf
-  lf[1,7] <- epi_lf
-  
-  #now have to go back, no way around this
-  model$S[loc,1] <- original_state
-  model$calculate(nodes=f_dependencies[f_start_depend[1]:f_end_depend[1]])
-}else{
-  #original epi==1
-  
-  epi_lf <- model$getLogProb(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-  lf[1,4] <- epi_lf
-  lf[1,5] <- epi_lf
-  lf[1,6] <- epi_lf
-  lf[1,7] <- epi_lf
-  
-  #now need to calcl end_lf
-  model$S[loc,1] <- 2
-  end_lf <- model$calculate(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-  lf[1,1] <- end_lf
-  lf[1,2] <- end_lf
-  lf[1,3] <- end_lf
-  
-  #now have to go back, no way around this
-  model$S[loc,1] <- original_state
-  model$calculate(nodes=f_dependencies[f_start_depend[1]:f_end_depend[1]])
-  
-  
-}
-
-#no ll for the first state
-nl <- log(model$uniff[1:7])+lf[1,1:7]
-nls <- nl-max(nl)
-q[1,1:7] <- exp(nls)/sum(exp(nls))
-
-#now run filter 
-for(ct in 2:(numnodes-1)){
-  
-  #ct <- 2
-  q_tm1 <- q[ct-1,1:7]
-  p <- t(model$tm[loc,ct,1:7,1:7]) %*% asCol(q_tm1[1:7])
-  
-  #now need to calculate log-likelood
-  
-  #state 1 
-  if(model$y[loc,ct]==0){
-    ll[ct,1] <- 0
-  }else{
-    ll[ct,1] <- -Inf
-  }
-  
-  #state 2 and 3
-  llen <- dnbinom(x=model$y[loc,ct],size = model$r0 ,
-                  prob = model$r0/(model$r0+model$lambda_en[loc,ct]),log =TRUE)
-  
-  ll[ct,2] <- llen
-  ll[ct,3] <- llen
-  
-  #states 4 and 5
-  llep <- dnbinom(x=model$y[loc,ct],size = model$r1 ,
-                  prob = model$r1/(model$r1+model$lambda_ep[loc,ct]),log =TRUE)
-  
-  ll[ct,4] <- llep
-  ll[ct,5] <- llep
-  ll[ct,6] <- llep
-  ll[ct,7] <- llep
-  
-  nly <- asRow(exp(ll[ct,1:7])) %*% p
-  model$mlik[loc,ct] <- nly
-  
-  #calc forward dependencies
-  original_state <- model$S[loc,ct]
-  original_epi <- model$epi_indi[original_state]
-  
-  if(original_epi==0){
-    
-    end_lf <- model$getLogProb(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-    lf[ct,1] <- end_lf
-    lf[ct,2] <- end_lf
-    lf[ct,3] <- end_lf
-    
-    #now need to calcl epi_lf
-    model$S[loc,ct] <- 4
-    epi_lf <- model$calculate(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-    lf[ct,4] <- epi_lf
-    lf[ct,5] <- epi_lf
-    lf[ct,6] <- epi_lf
-    lf[ct,7] <- epi_lf
-    
-    #now have to go back, no way around this
-    model$S[loc,ct] <- original_state
-    model$calculate(nodes=f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-  }else{
-    #original epi==1
-    
-    epi_lf <- model$getLogProb(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-    lf[ct,4] <- epi_lf
-    lf[ct,5] <- epi_lf
-    lf[ct,6] <- epi_lf
-    lf[ct,7] <- epi_lf
-    
-    #now need to calcl end_lf
-    model$S[loc,ct] <- 2
-    end_lf <- model$calculate(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-    lf[ct,1] <- end_lf
-    lf[ct,2] <- end_lf
-    lf[ct,3] <- end_lf
-    
-    #now have to go back, no way around this
-    model$S[loc,ct] <- original_state
-    model$calculate(nodes=f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-    
-    
-  }
-  
-  nl <- ll[ct,1:7]+log(p[1:7,1])+lf[ct,1:7]
-  nls <- nl-max(nl)
-  q[ct,1:7] <- exp(nls)/sum(exp(nls))
-  
-}
-
-#now final filter, no forward dependencies
-ct <- numnodes
-q_tm1 <- q[ct-1,1:7]
-p <- t(model$tm[loc,ct,1:7,1:7]) %*% asCol(q_tm1[1:7])
-
-#now need to calculate log-likelood
-
-#state 1 
-if(model$y[loc,ct]==0){
-  ll[ct,1] <- 0
-}else{
-  ll[ct,1] <- -Inf
-}
-
-#state 2 and 3
-llen <- dnbinom(x=model$y[loc,ct],size = model$r0 ,
-                prob = model$r0/(model$r0+model$lambda_en[loc,ct]),log =TRUE)
-
-ll[ct,2] <- llen
-ll[ct,3] <- llen
-
-#states 4 and 5
-llep <- dnbinom(x=model$y[loc,ct],size = model$r1 ,
-                prob = model$r1/(model$r1+model$lambda_ep[loc,ct]),log =TRUE)
-
-ll[ct,4] <- llep
-ll[ct,5] <- llep
-ll[ct,6] <- llep
-ll[ct,7] <- llep
-
-nly <- asRow(exp(ll[ct,1:7])) %*% p
-model$mlik[loc,ct] <- nly
-
-nl <- ll[ct,1:7]+log(p[1:7,1])
-nls <- nl-max(nl)
-q[ct,1:7] <- exp(nls)/sum(exp(nls))
-
-
-model$calculate(nodes=calcNodes)
-
-#test
-calcNodes
-model$S[loc_test, dq1]
-model$mlik[loc_test,]
-model$getLogProb()
-model$calculate()
-
-#q should be the same as above
-print(q)
-
-
-#mlik for WAIC
-#this sampler calculates the partially marginalized density for the WAIC
-#see Section 3.1 of the supplementary materials
-WAIC_mlik <- nimbleFunction(
-  
-  contains = sampler_BASE,
-  
-  setup = function(model, mvSaved, target, control) {
-    
-    #setup
-    nnames0 <- model$expandNodeNames(target)
-    times <- as.numeric(gsub(".*\\[.*,(.*)\\].*", "\\1", nnames0))
-    loc <- as.numeric(gsub(".*\\[(.*),.*\\].*", "\\1", nnames0[[1]]))
-    calcNodes <- model$getDependencies(target)
-    numnodes <- length(nnames0)
-    nnames <- paste0("S[",loc,", ",1:numnodes,"]")
-    #grab the dependencies of each target node
-    dependencies <- NULL
-    start_depend <- rep(NA,numnodes)
-    start_depend[1] <- 1
-    end_depend <- rep(NA,numnodes)
-    index <- 1
-    for (n in nnames){
-      d <- model$getDependencies(n)
-      dependencies <- c(dependencies,d)
-      end_depend[index] <- length(d)+start_depend[index]-1
-      start_depend[index+1] <- end_depend[index]+1
-      index <- index+1
-    } 
-    #need forward dependencies, this may have to be modified if you change model specification
-    #note this does not work for last time as last time has no forward dependencies
-    f_dependencies <- NULL
-    f_start_depend <- rep(NA,numnodes)
-    f_start_depend[1] <- 1
-    f_end_depend <- rep(NA,numnodes)
-    index <- 1
-    for(n in nnames){
-      d <- model$getDependencies(n)
-      d <- d[grepl(paste0(".*\\[(?!",loc,",).*,.*\\].*"),d,perl=TRUE)]
-      f_dependencies <- c(f_dependencies,d)
-      f_end_depend[index] <- length(d)+f_start_depend[index]-1
-      f_start_depend[index+1] <- f_end_depend[index]+1
-      index <- index+1
-    }
-    
-    q <- matrix(nrow=numnodes,ncol=7)
-    q[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
-    #log likelihood for the states
-    ll <- matrix(nrow=numnodes,ncol=7)
-    ll[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
-    #log forward adjustment
-    lf <- matrix(nrow=numnodes,ncol=7)
-    lf[1,1:7] <- c(-.99,-.99,-.99,-.99,-.99,-.99,-.99)
-    
-    
-    
-  },
-  
-  
-  run = function() {
-    
-    #now run 
-    #start with ct=1
-    #in coupled filter have to add the lf to the log of the initial state distribution
-    #the forward dependencies should only depend on if the main chain state is epidemic
-    
-    #calc forward dependencies
-    original_state <- model$S[loc,1]
-    original_epi <- model$epi_indi[original_state]
-    
-    if(original_epi==0){
-      
-      end_lf <- model$getLogProb(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-      lf[1,1] <<- end_lf
-      lf[1,2] <<- end_lf
-      lf[1,3] <<- end_lf
-      
-      #now need to calcl epi_lf
-      model$S[loc,1] <<- 4
-      epi_lf <- model$calculate(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-      lf[1,4] <<- epi_lf
-      lf[1,5] <<- epi_lf
-      lf[1,6] <<- epi_lf
-      lf[1,7] <<- epi_lf
-      
-      #now have to go back, no way around this
-      model$S[loc,1] <<- original_state
-      model$calculate(nodes=f_dependencies[f_start_depend[1]:f_end_depend[1]])
-    }else{
-      #original epi==1
-      
-      epi_lf <- model$getLogProb(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-      lf[1,4] <<- epi_lf
-      lf[1,5] <<- epi_lf
-      lf[1,6] <<- epi_lf
-      lf[1,7] <<- epi_lf
-      
-      #now need to calcl end_lf
-      model$S[loc,1] <<- 2
-      end_lf <- model$calculate(f_dependencies[f_start_depend[1]:f_end_depend[1]])
-      lf[1,1] <<- end_lf
-      lf[1,2] <<- end_lf
-      lf[1,3] <<- end_lf
-      
-      #now have to go back, no way around this
-      model$S[loc,1] <<- original_state
-      model$calculate(nodes=f_dependencies[f_start_depend[1]:f_end_depend[1]])
-      
-      
-    }
-    
-    #no ll for the first state
-    nl <- log(model$uniff[1:7])+lf[1,1:7]
-    nls <- nl-max(nl)
-    q[1,1:7] <<- exp(nls)/sum(exp(nls))
-    
-    #now run filter 
-    for(ct in 2:(numnodes-1)){
-      
-      #ct <- 2
-      q_tm1 <- q[ct-1,1:7]
-      p <- t(model$tm[loc,ct,1:7,1:7]) %*% asCol(q_tm1[1:7])
-      
-      #now need to calculate log-likelood
-      
-      #state 1 
-      if(model$y[loc,ct]==0){
-        ll[ct,1] <<- 0
-      }else{
-        ll[ct,1] <<- -Inf
-      }
-      
-      #state 2 and 3
-      llen <- dnbinom(x=model$y[loc,ct],size = model$r0[1] ,
-                      prob = model$r0[1]/(model$r0[1]+model$lambda_en[loc,ct]),log =TRUE)
-      
-      ll[ct,2] <<- llen
-      ll[ct,3] <<- llen
-      
-      #states 4 and 5
-      llep <- dnbinom(x=model$y[loc,ct],size = model$r1[1] ,
-                      prob = model$r1[1]/(model$r1[1]+model$lambda_ep[loc,ct]),log =TRUE)
-      
-      ll[ct,4] <<- llep
-      ll[ct,5] <<- llep
-      ll[ct,6] <<- llep
-      ll[ct,7] <<- llep
-      
-      nly <- asRow(exp(ll[ct,1:7])) %*% p[1:7,1]
-      model$mlik[loc,ct] <<- nly[1,1]
-      
-      #calc forward dependencies
-      original_state <- model$S[loc,ct]
-      original_epi <- model$epi_indi[original_state]
-      
-      if(original_epi==0){
-        
-        end_lf <- model$getLogProb(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-        lf[ct,1] <<- end_lf
-        lf[ct,2] <<- end_lf
-        lf[ct,3] <<- end_lf
-        
-        #now need to calcl epi_lf
-        model$S[loc,ct] <<- 4
-        epi_lf <- model$calculate(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-        lf[ct,4] <<- epi_lf
-        lf[ct,5] <<- epi_lf
-        lf[ct,6] <<- epi_lf
-        lf[ct,7] <<- epi_lf
-        
-        #now have to go back, no way around this
-        model$S[loc,ct] <<- original_state
-        model$calculate(nodes=f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-      }else{
-        #original epi==1
-        
-        epi_lf <- model$getLogProb(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-        lf[ct,4] <<- epi_lf
-        lf[ct,5] <<- epi_lf
-        lf[ct,6] <<- epi_lf
-        lf[ct,7] <<- epi_lf
-        
-        #now need to calcl end_lf
-        model$S[loc,ct] <<- 2
-        end_lf <- model$calculate(f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-        lf[ct,1] <<- end_lf
-        lf[ct,2] <<- end_lf
-        lf[ct,3] <<- end_lf
-        
-        #now have to go back, no way around this
-        model$S[loc,ct] <<- original_state
-        model$calculate(nodes=f_dependencies[f_start_depend[ct]:f_end_depend[ct]])
-        
-        
-      }
-      
-      nl <- ll[ct,1:7]+log(p[1:7,1])+lf[ct,1:7]
-      nls <- nl-max(nl)
-      q[ct,1:7] <<- exp(nls)/sum(exp(nls))
-      
-    }
-    
-    #now final filter, no forward dependencies
-    q_tm1 <- q[numnodes-1,1:7]
-    p <- t(model$tm[loc,numnodes,1:7,1:7]) %*% asCol(q_tm1[1:7])
-    
-    #now need to calculate log-likelood
-    
-    #state 1 
-    if(model$y[loc,numnodes]==0){
-      ll[numnodes,1] <<- 0
-    }else{
-      ll[numnodes,1] <<- -Inf
-    }
-    
-    #state 2 and 3
-    llen <- dnbinom(x=model$y[loc,numnodes],size = model$r0[1] ,
-                    prob = model$r0[1]/(model$r0[1]+model$lambda_en[loc,numnodes]),log =TRUE)
-    
-    ll[numnodes,2] <<- llen
-    ll[numnodes,3] <<- llen
-    
-    #states 4 and 5
-    llep <- dnbinom(x=model$y[loc,numnodes],size = model$r1[1] ,
-                    prob = model$r1[1]/(model$r1[1]+model$lambda_ep[loc,numnodes]),log =TRUE)
-    
-    ll[numnodes,4] <<- llep
-    ll[numnodes,5] <<- llep
-    ll[numnodes,6] <<- llep
-    ll[numnodes,7] <<- llep
-    
-    nly <- asRow(exp(ll[numnodes,1:7])) %*% p[1:7,1]
-    model$mlik[loc,numnodes] <<- nly[1,1]
-    
-    nl <- ll[numnodes,1:7]+log(p[1:7,1])
-    nls <- nl-max(nl)
-    q[numnodes,1:7] <<- exp(nls)/sum(exp(nls))
-    
-    
-    model$calculate(nodes=calcNodes)
-    
-    
-    
-    copy(from = model, to = mvSaved, row = 1, 
-         nodes = calcNodes, logProb = TRUE)
-    
-  },
-  
-  methods = list(   reset = function () {}   )
-  
-)
-
 
 #iFFBS
 iFFBS <- nimbleFunction(
@@ -1427,21 +907,7 @@ for(loc in 1:N){
 
 print(hospital_modelConf)
 
-#have to set WAIC samplers
-for(loc in 1:N){
-  hospital_modelConf$removeSampler(paste0("mlik[",loc,", ",1:mT,"]"))
-  hospital_modelConf$addSampler(target=hospital_model$expandNodeNames(paste0("mlik[",loc,", ",1:mT,"]")),
-                                type="WAIC_mlik")
-}
-
-print(hospital_modelConf)
-
-#make sure to check that WAIC_mlik is at the end of the MCMC order
-#addsampler should add them to the end but need to check 
-hospital_modelConf$printSamplers(executionOrder = TRUE)
-
-hospital_modelConf$addMonitors(c("S","b0","b1","sigma_b0","sigma_b1","r0","r1",
-                                 "mlik"))
+hospital_modelConf$addMonitors(c("S","r0","r1"))
 
 hospitalMCMC <- buildMCMC(hospital_modelConf)
 
@@ -1453,38 +919,28 @@ initsFunction <- function(){
   start <- 0
   while(start==0){
     
-    b0_init <- rnorm(n=N,mean=0,sd=.5) 
     rho0_init <- runif(n=1,min=.1,max=.7)
     hospitalInits <- list("beta0"=rnorm(n=1,mean=0,sd=.5),"beta1"=rnorm(n=1,mean=0,sd=.5),
                           "beta2"=rnorm(n=1,mean=0,sd=.5),"beta3"=rnorm(n=1,mean=0,sd=.5),
-                          "beta4"=rnorm(n=1,mean=0,sd=.1),"beta5"=rnorm(n=1,mean=0,sd=.1),
-                          "beta6"=rnorm(n=1,mean=0,sd=.1),
-                          "b0"=b0_init,"b1"=b0_init+runif(n=N,min=.1,max=2),
                           "rho0"=rho0_init, "rho1"=runif(n=1,rho0_init+.05,1),
-                          "r1"=runif(n=1,min=0,max=20), "r0"=runif(n=1,min=0,max=10),
-                          "prec_b0"=runif(n=1,min=0,max=20),"prec_b1"=runif(n=1,min=0,max=20),
-                          "alpha"=rnorm(n=17,mean=0,sd=c(rep(.5,9),.1,.1,.1,.1,.1,.1,.1,.1)),
-                          "S"=S_init,
-                          "mlik"=matrix(rep(0,mT*N),nrow=N,ncol=mT))
+                          "r1"=runif(n=1,min=0,max=20),
+                          "alpha"=rnorm(n=5,mean=0,sd=.5),
+                          "S"=S_init)
     
     len <- matrix(nrow=N,ncol=mT)
     lep <- matrix(nrow=N,ncol=mT)
     for(i in 1:N){
       for(t in 2:mT){
-        len[i,t] <- hospitalInits$b0[i]+
-          hospitalInits$beta5*(mobility_matrix[i,t-1]-mmobility_matrix)
-        lep[i,t] <- hospitalInits$b1[i]+
-          hospitalInits$beta4*(mobility_matrix[i,t-1]-mmobility_matrix)+
-          hospitalInits$beta6*new_variant[t]
+        len[i,t] <- hospitalInits$beta0+hospitalInits$beta2*(standard_cap[i]-mean(standard_cap[1:N]))
+        lep[i,t] <- hospitalInits$beta1+hospitalInits$beta3*(standard_cap[i]-mean(standard_cap[1:N]))
       }
     }
-    ifelse(min(lep-len,na.rm=TRUE)>.01,start <- 1,start <- 0)
+    ifelse(min(lep-len,na.rm=TRUE)>.1,start <- 1,start <- 0)
     
   }
   print(min(lep-len,na.rm=TRUE))
   
   return(hospitalInits)
-  
 } 
 
 #this will run the MCMC
@@ -1492,75 +948,27 @@ samples <- runMCMC(ChospitalMCMC,  niter =200000,nchains = 3,nburnin=50000
                    ,samplesAsCodaMCMC = TRUE,thin=15,inits = initsFunction)
 
 
-##test convergence
+
+##check convergence
 #should all be less than 1.05
-gelman.diag(samples[,c("beta0","beta1","beta2","beta3","r1","sigma_b0","sigma_b1","rho1","alpha[1]","alpha[2]",
-                       "b0[1]","alpha[3]","alpha[4]","rho0","r0","alpha[5]","alpha[6]","alpha[7]","alpha[8]","alpha[9]",
-                       "alpha[10]","alpha[11]","alpha[12]","alpha[13]","alpha[14]","alpha[15]","alpha[16]","alpha[17]",
-                       "b1[1]","b0[2]","b1[2]","b0[3]","b1[3]","b0[4]","b1[4]","b0[5]","b1[5]",
-                       "b0[6]","b1[6]","b0[7]","b1[7]","b0[8]","b1[8]","b0[9]","b1[9]",
-                       "b0[10]","b1[10]","b0[11]","b1[11]","b0[12]","b1[12]","b0[13]","b1[13]",
-                       "b0[14]","b1[14]","b0[15]","b1[15]","b0[16]","b1[16]",
-                       "b0[17]","b1[17]","b0[18]","b1[18]","b0[19]","b1[19]","b0[20]","b1[20]",
-                       "b0[21]","b1[21]","b0[22]","b1[22]","b0[23]","b1[23]",
-                       "b0[24]","b1[24]","b0[25]","b1[25]","b0[26]","b1[26]",
-                       "b0[27]","b1[27]","b0[28]","b1[28]","b0[29]","b1[29]","b0[30]","b1[30]",
-                       "beta4","beta5","beta6")])
+gelman.diag(samples[,c("beta0","beta1",
+                       "beta2","beta3",
+                       "rho0","rho1","r1",
+                       "alpha[1]","alpha[2]","alpha[3]","alpha[4]",
+                       "alpha[5]")])
 
+ess <- effectiveSize(samples[,c("beta0","beta1",
+                                "beta2","beta3",
+                                "rho0","rho1","r1",
+                                "alpha[1]","alpha[2]","alpha[3]","alpha[4]",
+                                "alpha[5]")])
+
+ess
 #should be greater than 1000
-min(effectiveSize(samples[,c("beta0","beta1","beta2","beta3","r1","sigma_b0","sigma_b1","rho1","alpha[1]","alpha[2]",
-                             "b0[1]","alpha[3]","alpha[4]","rho0","r0","alpha[5]","alpha[6]","alpha[7]","alpha[8]","alpha[9]",
-                             "alpha[10]","alpha[11]","alpha[12]","alpha[13]","alpha[14]","alpha[15]","alpha[16]","alpha[17]",
-                             "b1[1]","b0[2]","b1[2]","b0[3]","b1[3]","b0[4]","b1[4]","b0[5]","b1[5]",
-                             "b0[6]","b1[6]","b0[7]","b1[7]","b0[8]","b1[8]","b0[9]","b1[9]",
-                             "b0[10]","b1[10]","b0[11]","b1[11]","b0[12]","b1[12]","b0[13]","b1[13]",
-                             "b0[14]","b1[14]","b0[15]","b1[15]","b0[16]","b1[16]",
-                             "b0[17]","b1[17]","b0[18]","b1[18]","b0[19]","b1[19]","b0[20]","b1[20]",
-                             "b0[21]","b1[21]","b0[22]","b1[22]","b0[23]","b1[23]",
-                             "b0[24]","b1[24]","b0[25]","b1[25]","b0[26]","b1[26]",
-                             "b0[27]","b1[27]","b0[28]","b1[28]","b0[29]","b1[29]","b0[30]","b1[30]",
-                             "beta4","beta5","beta6")]))
-
-#can also exam some traceplots
-plot(samples[,c("mlik[1, 90]","mlik[1, 100]")])
-plot(samples[,c("alpha[13]","alpha[14]")])
-plot(samples[,c("alpha[7]","alpha[12]")])
-#do summary to get exact numbers
-summary(samples[,c("alpha[7]","alpha[12]")])
-plot(samples[,c("beta4","beta5","beta6")])
-plot(samples[,c("alpha[1]","alpha[2]")])
-plot(samples[,c("alpha[11]","alpha[2]")])
-plot(samples[,c("alpha[17]","alpha[2]")])
-
-plot(samples[,c("beta0","beta1")])
-plot(samples[,c("rho0","rho1")])
-plot(samples[,c("beta2","beta3")])
-plot(samples[,c("beta4","beta5")])
-plot(samples[,c("alpha[5]","alpha[10]","alpha[15]")])
-
-plot(samples[,c("b0[1]","b1[1]")])
-
-#now can calculate the WAIC from Table 1
-samps <- data.frame(rbind(samples[[1]],samples[[2]],samples[[3]]))
-lppd <- 0 
-pwaic <- 0
-
-for(i in 1:N){
-  print(i)
-  for(t in 2:mT){
-    
-    mlikit <- samps[,paste0("mlik.",i,"..",t,".")]
-    
-    lppd <- lppd + log(mean(mlikit))
-    pwaic <- pwaic + var(log(mlikit))
-  }
-}
-
-waic <- -2*(lppd-pwaic)
-#should be 17,516
+min(ess)
 
 #fitted values
-mmobility_matrix <- mean(mobility_matrix)
+samps <- data.frame(rbind(samples[[1]],samples[[2]],samples[[3]]))
 fitted <- array(dim = c(N,mT,30000))
 fitted_en <- array(dim = c(N,mT,30000))
 fitted_ep <- array(dim = c(N,mT,30000))
@@ -1572,14 +980,13 @@ for(i in 1:N){
   print(i)
   for(t in 2:mT){
     
-    lambda_epit <- exp(as.numeric(unlist(samps[paste0("b1.",i,".")]))+
-                         samps[,"beta4"]*(mobility_matrix[i,t-1]-mmobility_matrix)+
-                         samps[,"beta6"]*new_variant[t]+
+    lambda_epit <- exp(as.numeric(unlist(samps[paste0("beta1")]+
+                                           samps[paste0("beta3")]*(standard_cap[i]-mean(standard_cap))))+
                          as.numeric(unlist(samps[paste0("rho1")]))*(lpsi[i,t-1]))
     
     
-    lambda_enit <-  exp(as.numeric(unlist(samps[paste0("b0.",i,".")]))+
-                          samps[,"beta5"]*(mobility_matrix[i,t-1]-mmobility_matrix)+
+    lambda_enit <-  exp(as.numeric(unlist(samps[paste0("beta0")]+
+                                            samps[paste0("beta2")]*(standard_cap[i]-mean(standard_cap))))+
                           as.numeric(unlist(samps[paste0("rho0")]))*(lpsi[i,t-1]))
     
     
@@ -1616,7 +1023,10 @@ for(i in 1:N){
   }
 }
 
-#plots Figure 5 from the main text for all areas
+library(plotrix)
+
+#this will compare the true and estimated states
+#also will plot the fit of y
 for(i in 1:30){
   
   med_en = apply(fitted_en[i,,],MARGIN = 1,mean)
@@ -1630,7 +1040,7 @@ for(i in 1:30){
   
   par(mfrow=c(2,1))
   
-  plot(1:mT,admissions[i,],type = "p",main=paste0(i),ylim=c(0,max(c(upper_en,upper_ep),na.rm = TRUE)+.25*mean(c(med_en,med_ep),na.rm = TRUE)),
+  plot(1:mT,ysim[i,],type = "p",main=paste0(i),ylim=c(0,max(c(upper_en,upper_ep),na.rm = TRUE)+.25*mean(c(med_en,med_ep),na.rm = TRUE)),
        cex=.5)
   
   
@@ -1646,8 +1056,86 @@ for(i in 1:30){
   medsep = apply(S_ep[i,,],MARGIN = 1,mean)
   medsen = apply(S_en[i,,],MARGIN = 1,mean)
   medsab = apply(S_ab[i,,],MARGIN = 1,mean)
-  plot(medsep,type="l",col="red",ylim=c(0,1))
+  twoord.plot(1:120,medsep,1:120,Ssim[i,],type=c("l","p"),lcol="red",rcol="black",cex=.75)
+  #plot(medsep,type="l",col="red",ylim=c(0,1))
   lines(medsen,col="blue")
   lines(medsab,col="green")
   
 }
+
+#now we will calculate the ROC curve based on the true states
+#versus the retrospective state estimates
+epidemic_actual <- ifelse(Ssim==3,1,0)
+medsep_matrix <- matrix(nrow=30,ncol=120)
+for(i in 1:30){
+  
+  medsep_matrix[i,] <- apply(S_ep[i,,],MARGIN = 1,mean)
+  
+}
+
+library(pROC)
+par(mfrow=c(1,1))
+roc_score=roc(as.vector(epidemic_actual[,2:120]), as.vector(medsep_matrix[,2:120])) #AUC score
+plot(roc_score ,main ="ROC curve Outbreaks")
+roc_score
+#AUC is .995
+
+coords(roc_score, x=.5, input="threshold", ret=c("threshold",
+                                                 "specificity", "sensitivity"))
+#so will detect 94.4% of outbreak weeks and throw a false alarm during 2% of the endemic weeks
+#note retrospective so real-time will be less impressive (see SM Table 4),
+#but it does show the state estimates are reasonable and the model,
+#is working well
+
+#can be sensitive to the threshold
+#it seems raising the threshold above .5 is not worth it
+#specificity is already high
+coords(roc_score, x=.6, input="threshold", ret=c("threshold",
+                                                 "specificity", "sensitivity"))
+
+#more visualization
+#compares actual epidemic state and estimated epidemic state
+plot(epidemic_actual[6,])
+lines(medsep_matrix[6,],col="red")
+
+
+#calculate timeliness
+#cutoff =.5
+timeli <- NULL
+for(i in 1:N){
+  
+  #go period by period
+  period <- 1:30
+  start <- min(which(epidemic_actual[i,period]==1))+min(period)-1
+  ooo <- medsep_matrix[i,start:max(period)]
+  timeli <- c(timeli,min(which(ooo>.5)))
+  if(min(which(ooo>.5))==6 | min(which(ooo>.5))==5) print(i)
+  
+  period <- 31:60
+  start <- min(which(epidemic_actual[i,period]==1))+min(period)-1
+  ooo <- medsep_matrix[i,start:max(period)]
+  timeli <- c(timeli,min(which(ooo>.5)))
+  if(min(which(ooo>.5))==6 | min(which(ooo>.5))==5) print(i)
+  
+  period <- 61:90
+  start <- min(which(epidemic_actual[i,period]==1))+min(period)-1
+  ooo <- medsep_matrix[i,start:max(period)]
+  timeli <- c(timeli,min(which(ooo>.5)))
+  if(min(which(ooo>.5))==6 | min(which(ooo>.5))==5) print(i)
+  
+  period <- 91:120
+  start <- min(which(epidemic_actual[i,period]==1))+min(period)-1
+  ooo <- medsep_matrix[i,start:max(period)]
+  timeli <- c(timeli,min(which(ooo>.5)))
+  if(min(which(ooo>.5))==6 | min(which(ooo>.5))==5) print(i)
+  
+}
+
+mean(timeli)
+#timeliness = 1.48 weeks 
+#this means on average the outbreak is detected 1.48 weeks after it begins
+#since we have weekly data the fastest it can be detected is 1 week
+#i.e., the lowest the timeliness can be is 1 week
+
+
+
